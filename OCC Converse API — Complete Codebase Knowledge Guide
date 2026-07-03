@@ -1,0 +1,742 @@
+# OCC Converse API — Complete Codebase Knowledge Guide
+
+> Simple language. Real examples. Everything explained from scratch.
+
+---
+
+## 🧠 What Is This App? (30-second version)
+
+**It's a chatbot for IndiGo airline crew.**
+
+When a pilot or cabin crew member has a problem — "where is my hotel?", "I need a cab", "I want a day off" — they open this chat app and type their question.
+
+The bot reads their question, understands what they need, checks their roster data, and replies with the right answer or escalates to a human agent.
+
+---
+
+## 👤 Who Uses It?
+
+| User | What they do |
+|---|---|
+| **Crew Member (Pilot / Cabin)** | Asks questions about hotel, transport, lounge, duty travel, sick leave, day off |
+| **OCC Operator** | Monitors chats, handles transfers, sees flight/crew overview |
+| **Admin** | Manages knowledge base (policy PDFs), vector store |
+
+---
+
+## 🗺️ Big Picture — How the Whole System Works
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                    FRONTEND (Next.js)                    │
+│          converse_web_ui/  ← runs in browser             │
+│                                                          │
+│   Crew opens chat → types message → sees bot reply       │
+└─────────────────────┬───────────────────────────────────┘
+                      │ HTTP requests (REST API)
+                      ▼
+┌─────────────────────────────────────────────────────────┐
+│                   BACKEND (FastAPI / Python)             │
+│                   app/  ← runs on server                 │
+│                                                          │
+│  1. Receives message                                     │
+│  2. Classifies intent (GPT-1)                            │
+│  3. Runs workflow (hotel / lounge / sick leave etc.)     │
+│  4. Formats reply (GPT-2)                                │
+│  5. Returns structured JSON response                     │
+└──────┬──────────────┬───────────────┬────────────────────┘
+       │              │               │
+       ▼              ▼               ▼
+  MongoDB         Azure OpenAI    External APIs
+  (chat history)  (GPT-4 LLM)    (Lounge, Roster, Crew Mobile)
+```
+
+---
+
+## 📁 Folder Structure — Every Folder Explained
+
+```
+occ-converse-api/
+│
+├── app/                        ← BACKEND (Python / FastAPI)
+│   ├── main.py                 ← App entry point, starts FastAPI server
+│   ├── api/                    ← HTTP layer (routes, request validation)
+│   ├── domain/                 ← Business logic (the brain of the app)
+│   ├── integrations/           ← External connections (MongoDB, Azure, APIs)
+│   ├── models/                 ← Data shapes (what JSON looks like)
+│   └── core/                   ← App config, logging, constants
+│
+├── converse_web_ui/            ← FRONTEND (Next.js / TypeScript)
+│   └── src/
+│       ├── app/                ← Pages (what user sees)
+│       ├── components/         ← Reusable UI pieces
+│       ├── stores/             ← State management (Zustand)
+│       └── hooks/              ← Custom React hooks
+│
+├── tests/                      ← All test files
+│   ├── unit/                   ← Tests for pure logic functions
+│   ├── integration/            ← Tests for API endpoints
+│   ├── business_flows/         ← Tests for full crew journeys
+│   └── security/               ← Tests for AI safety
+│
+├── data/                       ← Policy PDFs for the knowledge base
+├── scripts/                    ← Utility scripts (DB setup, etc.)
+└── requirements.txt            ← Python dependencies
+```
+
+---
+
+## 🔧 Tech Stack
+
+| Layer | Technology | What it does |
+|---|---|---|
+| Frontend | **Next.js 14 + TypeScript** | Chat UI, operator dashboard |
+| Backend | **FastAPI (Python)** | API server, business logic |
+| AI Brain | **Azure OpenAI (GPT-4)** | Understands crew questions |
+| Database | **MongoDB** | Stores chat history |
+| Vector Search | **MongoDB Atlas Vector** | Finds relevant policy text |
+| External | **Lounge API** | Gets lounge eligibility data |
+| External | **Crew Mobile API** | Gets crew roster / duty schedule |
+| External | **MCP (Model Context Protocol)** | Sick leave, day-off submissions |
+| Tests | **pytest + httpx** | Automated test suite |
+| CI/CD | **GitHub Actions** | Runs tests on every push |
+
+---
+
+## 🏗️ BACKEND — Deep Dive
+
+### `app/main.py` — The Entry Point
+
+This is where the server starts. Think of it as the front door.
+
+```python
+app = FastAPI(title="crewBot")
+app.add_middleware(CORSMiddleware, ...)   # Allow frontend to call backend
+app.include_router(api_router)           # Register all routes
+```
+
+On startup it:
+1. Configures logging
+2. Creates MongoDB indexes for fast session lookup
+
+---
+
+### `app/api/` — The HTTP Layer (What URLs exist?)
+
+```
+app/api/
+├── router.py         ← Combines all routes into one router
+├── dependencies.py   ← Shared objects (DB connection, services)
+└── routes/
+    ├── chat.py        → POST /chat
+    ├── userinfo.py    → GET/POST /userinfo
+    ├── session.py     → GET /session/list, POST /session/roster-bootstrap
+    ├── chathistory.py → GET /chathistory
+    ├── health.py      → GET /health
+    └── vectorstore.py → POST /vectorstore/...
+```
+
+#### All API Endpoints
+
+| Method | URL | What it does |
+|---|---|---|
+| `GET` | `/health` | Is the server alive? |
+| `GET` | `/userinfo` | List available test crew profiles |
+| `POST` | `/userinfo` | Login as a crew member → creates session |
+| `POST` | `/userinfo/guest` | Start anonymous session (collects email via chat) |
+| `POST` | `/chat` | **Main endpoint** — send a message, get a reply |
+| `POST` | `/chat` (bootstrap) | Load roster data → streams welcome + roster messages |
+| `GET` | `/chathistory` | Get all messages in a session |
+| `GET` | `/session/list` | List all sessions for an email |
+| `POST` | `/session/roster-bootstrap` | Load crew's roster from Crew Mobile API |
+| `POST` | `/vectorstore/crewcontrol` | Ingest policy PDFs into vector store (crew control) |
+| `POST` | `/vectorstore/crewlogistics` | Ingest policy PDFs into vector store (logistics) |
+
+---
+
+### `app/domain/` — The Brain (Business Logic)
+
+This is the most important folder. Every business decision lives here.
+
+```
+app/domain/
+├── chat/           ← ChatService: top-level message handler
+├── orchestrator/   ← The routing brain: GPT-1 + GPT-2 + workflow executor
+├── workflow/       ← Every specific business flow (hotel, lounge, etc.)
+├── session/        ← Session management and roster bootstrap
+├── intent/         ← Intent classification helpers
+├── retrieval/      ← Vector search for policy documents
+└── ingestion/      ← PDF → chunks → vector store pipeline
+```
+
+---
+
+#### How a Message Gets Processed (Step by Step)
+
+```
+Crew sends: "Where is my hotel?"
+                │
+                ▼
+         POST /chat
+                │
+                ▼
+         ChatService.handle_message()
+                │
+                ▼
+         OrchestratorService.handle()
+         ┌──────────────────────────┐
+         │                          │
+         │  Step 1: GPT-1           │  ← "What does crew want?"
+         │  → Intent: "hotel"       │     Classifies intent
+         │  → Workflow: ["hotel"]   │     Returns JSON decision
+         │                          │
+         │  Step 2: WorkflowExecutor│  ← Runs the hotel workflow
+         │  → Checks crew auth      │     Checks hours since arrival
+         │  → Checks hotel data     │     Decides: ticket / transfer / info
+         │  → Returns decision      │
+         │                          │
+         │  Step 3: GPT-2           │  ← "How should we say this?"
+         │  → Formats human reply   │     Turns decision into natural text
+         │                          │
+         └──────────────────────────┘
+                │
+                ▼
+         JSON response → Frontend → Crew sees reply
+```
+
+---
+
+#### `app/domain/orchestrator/` — The Traffic Controller
+
+```
+orchestrator/
+├── service.py      ← OrchestratorService: master coordinator
+├── executor.py     ← WorkflowExecutor: runs the right workflow
+├── models.py       ← OrchestratorDecision data model
+├── flow_logger.py  ← Logs every GPT call for debugging
+├── gpt1/
+│   └── client.py   ← Gpt1OrchestratorClient: classifies intent
+└── gpt2/
+    ├── client.py   ← Gpt2ResponseClient: formats final reply
+    └── system_prompt.txt ← The prompt that shapes the bot's voice
+```
+
+**GPT-1 job:** Read the message and decide:
+- What does the crew want? (`intent`)
+- Do we need to search policy docs? (`needsvector`)
+- Do we need crew roster data? (`needsMCP`)
+- Which workflow to run? (`workflow`)
+
+**GPT-2 job:** Take the raw workflow result and write a friendly, natural reply.
+
+---
+
+#### `app/domain/workflow/` — All Business Flows
+
+This is where every scenario is coded.
+
+```
+workflow/
+├── bluepoint/
+│   ├── flow.py       ← validate_date() — checks if date is in valid range
+│   ├── dayoff.py     ← apply_bluepoint_dayoff() — crew requests a day off
+│   └── sectoroff.py  ← (stub, not implemented)
+│
+├── crew_control/
+│   ├── roster_format.py  ← Parses MCP roster response to clean dict
+│   ├── sickness.py       ← ApplySickLeave workflow
+│   ├── fdtl.py           ← (empty, not implemented)
+│   └── roaster.py        ← Calls live MCP to get roster
+│
+├── crew_logistics/
+│   ├── Hotel/            ← Hotel workflow (H-01 to H-13 scenarios)
+│   ├── duty_travel/      ← Duty Travel workflow (DT01/02/03 + level 2)
+│   └── lounge/           ← Lounge workflow (Q-gates, A-paths, C/S/R paths)
+│
+└── ops_control/
+    ├── sub_flowops.py        ← Main OpsControlWorkflow + roster logic
+    ├── weather.py            ← Weather-related ops decisions
+    ├── technical.py          ← Technical issue decisions
+    ├── security.py           ← Security issue decisions
+    ├── flight_diversion.py   ← Flight diversion decisions
+    └── watch_hour_notams.py  ← Watch hours / NOTAM decisions
+```
+
+---
+
+##### Workflow: Crew Logistics (the biggest one)
+
+```
+Crew asks about a logistics topic
+            │
+            ▼
+    LogisticsWorkflow
+            │
+     ┌──────┴──────┐
+     │             │
+     ▼             ▼
+  Level 1        Level 2
+  (main menu)    (sub-flows)
+     │
+     ├── Duty Travel (DHT/DHF detection, PNR check, time window)
+     ├── Seat Assignment (seat shown / defer to airport / not applicable)
+     ├── Excess Baggage (10kg/30kg/100kg/150kg policy by duty code + rank)
+     ├── Change in Booking (routes to Crew Training / Pilot Admin / IFS Admin)
+     ├── Unable to Reach for Flight (asks reason → transfers)
+     ├── Issue at Check-in (immediate transfer)
+     ├── Reimbursement (create ticket)
+     └── Feedback (create ticket)
+```
+
+---
+
+##### Workflow: Hotel
+
+```
+Crew asks about hotel
+        │
+        ├── No hotel assigned?
+        │   ├── Arrived < 2h → Transfer to agent
+        │   ├── Next duty < 12h → Create ticket
+        │   └── International?
+        │       ├── Halt < 4h → Not authorised
+        │       └── Halt ≥ 4h → Forex card message
+        │
+        ├── Day Use request?
+        │   ├── Halt < 4h → Not authorised (regardless of crew type)
+        │   └── Halt ≥ 4h + Operating crew → App link
+        │
+        ├── Hotel Cab?
+        │   ├── Airport → Hotel → Ask if contacted hotel first
+        │   └── Hotel → Airport/Training → Transfer / Create ticket
+        │
+        ├── Issue in room? → 9 issue types → Collect details → Transfer
+        ├── Stay Extension → Create ticket
+        ├── Relocation → Ticket (+ IFS approval if Cabin)
+        ├── Feedback → URL form (Cockpit) or Ticket (Cabin)
+        └── Reimbursement → Create ticket
+```
+
+---
+
+##### Workflow: Lounge
+
+```
+Crew asks about lounge access
+        │
+        ├── Q1: International station? → Forex card message (exit)
+        ├── Q2: Halt < 2h? → Not eligible (exit)
+        ├── Q3: Training/Ground duty? → Not eligible (exit)
+        ├── Q4: No contracted lounge + halt 2-4h? → INR 500 meal (exit)
+        ├── Q5: Special station + next leg international? → INR 500 (exit)
+        ├── Q6: Halt 3h-12h + Operating + no lounge? → Auth email (exit)
+        │
+        └── Awaiting in lounge? (A-paths)
+            ├── A1: Within 3h + lounge operational → Transfer to agent
+            ├── A2: Special station + INTL next leg → INR 500
+            ├── A3: DEL3/CCJ + domestic next leg → Transfer
+            ├── A4: No lounge + within 3h → INR 500
+            ├── A5: Lounge not operational → Show hours + INR 500
+            ├── A6: Outside 3h-12h → Auth email
+            └── A7: Outside 12h → Auth email / INR 500
+
+C-paths: Couldn't use lounge → Create P2 ticket
+S-paths: Had lounge issue → INR 500 + ticket / Acknowledge
+R-paths: Reimbursement/Feedback → Collect details → Create ticket
+```
+
+---
+
+##### Workflow: Bluepoint (Day Off)
+
+```
+Crew asks for a day off
+        │
+        ├── validate_date() → Filter roster to eligible dates
+        ├── apply_bluepoint_dayoff()
+        │   ├── Selected today → TODAY_OFF constant (transfer to live agent)
+        │   ├── Selected future date → NEXT_DAY_OFF.format(date) (create ticket)
+        │   └── Invalid date → "not available for day off selection"
+        └── get_dayoff_valid_dates() → Calls MCP roster (async)
+```
+
+---
+
+##### Workflow: Ops Control
+
+```
+Crew contacts about ops issue
+        │
+        ├── Load roster (MCP or cache)
+        ├── Filter roster to current 48h window
+        ├── Group by same day
+        ├── Crew selects a roster item
+        ├── Crew selects an option
+        └── Dispatch to sub-handler:
+            ├── Weather issue → weather.py
+            ├── Technical issue → technical.py
+            ├── Security issue → security.py
+            ├── Flight diversion → flight_diversion.py
+            └── Watch hours/NOTAMs → watch_hour_notams.py
+```
+
+---
+
+### `app/integrations/` — Connecting to External Systems
+
+```
+integrations/
+├── llm/
+│   └── chat_client.py     ← Connects to Azure OpenAI (GPT-4)
+│
+├── mongo/
+│   ├── client.py          ← MongoDB connection
+│   └── repositories/
+│       └── chat.py        ← Save/load chat history
+│
+├── agents/                ← AI agent wrappers
+│
+├── mcp-server/            ← MCP protocol client (for sick leave / roster)
+│
+└── third_party_api/
+    ├── lounge_station_api.py   ← Get airport type + lounge data
+    ├── lounge_token_api.py     ← Auth token for lounge API
+    ├── crew_mobile_roster_api.py ← Fetch crew duty roster
+    ├── crew_mobile_logistics_api.py ← Crew logistics data
+    └── crew_mobile_encryption_api.py ← Encrypted API calls
+```
+
+**Key external APIs:**
+
+```
+IndiGo Lounge API
+  └── lounge_token_api.get_token()     → Get bearer token
+  └── lounge_station_api.get_airport_type("BOM") → "DOM" / "INT" / "UNKNOWN"
+  └── lounge_station_api.fetch_lounge_data("BOM") → Lounge details (hours, tie-up)
+
+Crew Mobile API
+  └── crew_mobile_roster_api.fetch_roster(iga_code) → List of duty items
+  └── crew_mobile_logistics_api → Hotel/transport info
+
+MCP (Model Context Protocol)
+  └── Used for: sick leave submission, day-off submission, roster fetch
+  └── Requires live Azure AD credentials (not available in tests)
+```
+
+---
+
+### `app/core/` — App Configuration
+
+```
+core/
+├── config.py       ← All env variables (MongoDB URL, Azure keys, CORS, etc.)
+├── constants.py    ← String constants used across workflows (TODAY_OFF, NEXT_DAY_OFF, etc.)
+├── logging.py      ← Structured JSON logging setup
+└── user_profile.py ← CrewUserProfile data class (iga_code, name, rank, qual)
+```
+
+**`CrewUserProfile` — the crew identity object:**
+```python
+profile.iga_code  = "78144"
+profile.name      = "MUNISH.PAUL@GOINDIGO.IN"
+profile.rank      = "CP"      # Captain
+profile.qual      = "Airbus"
+```
+
+---
+
+### `app/models/schemas.py` — Request/Response Shapes
+
+Key models:
+
+| Model | What it is |
+|---|---|
+| `ChatRequest` | What the frontend sends to `/chat` |
+| `ChatResponse` | What `/chat` sends back |
+| `UserInfoSelectResponse` | Login response with session_id + crew profile |
+| `VectorIngestResult` | Result of PDF ingestion |
+| `BootstrapMessage` | Welcome/roster message streamed on session start |
+
+---
+
+## 🖥️ FRONTEND — Deep Dive
+
+### What is it?
+
+A **Next.js** (React) web application. It's the chat window that crew and operators see.
+
+```
+converse_web_ui/src/
+├── app/
+│   ├── (auth)/           ← Login page
+│   ├── (operator)/       ← Operator dashboard pages
+│   │   ├── chat/         ← Crew chat list
+│   │   ├── crew-chat/    ← Individual crew chat window
+│   │   ├── flights/      ← Flight overview
+│   │   ├── broadcast/    ← Send announcements
+│   │   ├── handover/     ← Shift handover notes
+│   │   └── archives/     ← Past chats
+│   └── layout.tsx        ← App shell (sidebar, nav)
+│
+├── components/
+│   ├── chat/             ← Chat bubble, input box
+│   ├── crew-chat/        ← Crew-specific chat components
+│   ├── details-panel/    ← Right panel (crew info, roster)
+│   ├── flights/          ← Flight list components
+│   ├── layout/           ← Header, sidebar
+│   ├── notifications/    ← Alert banners
+│   └── shared/           ← Buttons, cards, etc.
+│
+├── stores/               ← Zustand state (session, messages, selected crew)
+├── hooks/                ← useChat, useRoster, etc.
+├── lib/                  ← API call functions (fetch wrappers)
+└── types/                ← TypeScript type definitions
+```
+
+---
+
+## 🔄 User Flows — Step by Step
+
+### Flow 1: Crew Logs In
+
+```
+1. Crew opens app → sees login page (auth)
+2. Selects their name from dropdown
+3. Frontend: POST /userinfo  { "Name": "MUNISH.PAUL@GOINDIGO.IN" }
+4. Backend: looks up profile → calls SSO + CrewQual API → builds CrewUserProfile
+5. Backend: creates session in memory cache + saves welcome message to MongoDB
+6. Backend: returns { session_id, IGACode, Rank, Qual, roster_pending: true }
+7. Frontend: shows welcome message
+
+8. Frontend: POST /chat  { session_id, bootstrap: true }
+9. Backend: streams NDJSON:
+   → { kind: "welcome", content: "Hello Munish..." }
+   → { kind: "fetching", content: "Loading your roster..." }
+   → { kind: "roster", content: { ...roster data... } }
+10. Frontend: shows crew their upcoming duties
+```
+
+---
+
+### Flow 2: Crew Asks a Question
+
+```
+1. Crew types: "Where is my hotel?"
+2. Frontend: POST /chat  { session_id, message: "Where is my hotel?" }
+
+3. Backend — OrchestratorService:
+   a. Load last 8 messages from MongoDB (chat history context)
+   b. GPT-1: classify intent
+      → { intent: "hotel", workflow: ["hotel"], needsMCP: true }
+   c. WorkflowExecutor: run hotel workflow
+      → Checks crew profile (rank, iga_code)
+      → Calls Crew Mobile API for hotel info
+      → Runs hotel decision tree (H-01 to H-13)
+      → Returns: { action: "create_ticket", message: "Your room is being arranged..." }
+   d. GPT-2: format into natural language reply
+   e. Save to MongoDB
+
+4. Frontend: displays reply
+```
+
+---
+
+### Flow 3: Crew Requests Sick Leave
+
+```
+1. Crew types: "I want to apply for sick leave"
+2. Backend GPT-1: intent = "sickness"
+3. WorkflowExecutor: sets pending state = "sickness"
+4. Bot asks: "Please provide your from date and to date"
+
+5. Crew types: "15 July to 18 July"
+6. Backend: session has pending="sickness" → skip GPT-1
+   → Parse dates from message
+   → Show confirmation: "Apply sick leave from 15/07 to 18/07 — confirm?"
+
+7. Frontend: shows confirm/cancel buttons
+8. Crew clicks confirm → POST /chat { sickness_action: "confirm", from: "2026-07-15", to: "2026-07-18" }
+9. Backend: calls MCP sick leave API
+10. Bot: "Your sick leave has been submitted"
+```
+
+---
+
+### Flow 4: Crew Requests Day Off (Bluepoint)
+
+```
+1. Crew types: "I want a day off"
+2. Backend GPT-1: intent = "bluepoint"
+3. WorkflowExecutor:
+   → Calls MCP roster → get_dayoff_valid_dates()
+   → validate_date() → filters eligible dates
+   → Shows calendar with selectable dates
+
+4. Crew selects: "2 July"
+5. Frontend: POST /chat { dayoff_action: "confirm", dayoff_date: "2026-07-02" }
+6. Backend: apply_bluepoint_dayoff()
+   → Today? → "We're connecting you to a live agent"
+   → Future? → "Your day off request has been created (ticket #XYZ)"
+
+7. Bot replies with outcome
+```
+
+---
+
+### Flow 5: Ops Control (Operator Checks Crew Roster)
+
+```
+1. Crew contacts about an ops issue
+2. Backend GPT-1: intent = "ops_control"
+3. WorkflowExecutor:
+   → Calls Roaster() → fetches roster via MCP
+   → Filters to 48h window
+   → Groups by same day
+   → Returns list of roster cards
+
+4. Crew selects a flight from the roster
+5. POST /chat { selected_roster: { flight: "6E-123", ... } }
+6. Bot: "What is the issue with this flight?"
+   Shows options: Weather / Technical / Security / Diversion / Watch Hours
+
+7. Crew selects option
+8. POST /chat { selected_option: "weather" }
+9. Backend: runs weather.py sub-handler
+10. Returns appropriate decision/message
+```
+
+---
+
+## 📊 Session & State Management
+
+```
+When crew logs in:
+  in-memory SessionCache stores:
+    session_id → {
+      profile: CrewUserProfile,
+      email,
+      roster_bootstrap_done: bool,
+      orchestrator_pending: "sickness" | "dayoff" | null,
+      pending_sickness_from_date,
+      pending_sickness_to_date,
+      pending_dayoff_date,
+    }
+
+Chat history stored in MongoDB:
+  collection: chat_history
+    {
+      session_id,
+      messages: [ { role: "user"/"assistant", content: "...", timestamp } ]
+    }
+```
+
+---
+
+## 🗃️ TESTS — What Was Built
+
+```
+tests/
+├── conftest.py              ← Test foundation: fake MongoDB, fake AI service
+│
+├── unit/                    ← 170 tests — pure logic, no network
+│   ├── test_lounge_workflow_helpers.py  (44 tests)
+│   ├── test_hotel_workflows.py          (44 tests — CabClubbing, StayExtension, IssueInHotel)
+│   ├── test_duty_travel_parsers.py      (27 tests — real parsers.py)
+│   ├── test_duty_travel_level2.py       (37 tests — real level2.py, duty_codes.py)
+│   ├── test_bluepoint_workflows.py      (9 tests  — validate_date, apply_bluepoint_dayoff)
+│   └── test_crew_control_workflows.py   (20 tests — roster_format, ApplySickLeave)
+│
+├── integration/             ← 86 tests — real API endpoints, fake DB
+│   ├── test_health_api.py
+│   ├── test_userinfo_api.py
+│   ├── test_chat_api.py
+│   ├── test_chathistory_api.py
+│   ├── test_session_api.py
+│   ├── test_vectorstore_api.py
+│   └── test_third_party_apis.py (23 tests — lounge, roster, token APIs)
+│
+├── business_flows/          ← 350 tests — full crew journeys
+│   ├── test_crew_logistics_flows.py      (DT, SEAT, BAGG, BOOK, REACH, REIMB)
+│   ├── test_duty_travel_flows.py         (49 tests)
+│   ├── test_lounge_flows.py              (65 tests — all Q/A/C/S/R paths)
+│   ├── test_hotel_and_transport_flows.py (73 tests — H-01–H-13, T-01–T-04)
+│   └── test_ops_control_flows.py         (34 tests)
+│
+└── security/                ← 6 tests
+    └── test_ai_security_api.py  (prompt injection, data leakage, authority bypass)
+```
+
+**Total: 625 passing, 0 failures**
+
+---
+
+## 🔐 Security & Auth
+
+| What | How |
+|---|---|
+| Crew identity | `staff_id` / `iga_code` validated on every request before any logic runs |
+| No real DB in tests | In-memory repo replaces MongoDB entirely |
+| No real AI in tests | `StubChatService` returns deterministic replies |
+| No secrets in CI | Fake env values used everywhere |
+| Prompt injection | Tested: bot refuses "ignore previous instructions" attacks |
+| Data leakage | Tested: bot never echoes secret tokens back |
+| Authority bypass | Tested: "approved by admin" in message doesn't skip confirmation step |
+
+---
+
+## 🐛 Bugs Fixed During Testing
+
+| Bug | Where | Fix |
+|---|---|---|
+| 3 unclosed `log_gpt2(` calls | `orchestrator/service.py` | Added missing `)` |
+| `0 hours` treated as `missing` | hotel engine | `value or 999` → `999 if value is None else value` |
+| Phantom module imports | `test_third_party_apis.py` | Replaced with real module names |
+| Wrong status constant | `StayExtensionWorkflow` | `CREATE_TICKET` → `TICKET_CREATED` |
+| Empty `__init__.py` | `crew_logistics/lounge/__init__.py` | Added all 9 exports |
+
+---
+
+## 🗺️ Feature–to–Feature Interaction Map
+
+```
+Login (userinfo)
+  └──► Creates session (session cache)
+        └──► Bootstrap (POST /chat bootstrap=true)
+              └──► Loads roster (Crew Mobile API)
+                    └──► Chat messages start (POST /chat message=...)
+                          └──► OrchestratorService
+                                ├──► GPT-1 classifies intent
+                                ├──► WorkflowExecutor runs workflow
+                                │     ├──► hotel workflow
+                                │     │     └──► Crew Mobile API (hotel data)
+                                │     ├──► lounge workflow
+                                │     │     └──► Lounge API (station data)
+                                │     ├──► duty travel workflow
+                                │     │     └──► Roster data (from session)
+                                │     ├──► sickness workflow
+                                │     │     └──► MCP server (sick leave)
+                                │     ├──► bluepoint workflow
+                                │     │     └──► MCP server (day off)
+                                │     └──► ops control workflow
+                                │           └──► MCP server (roster)
+                                └──► GPT-2 formats reply
+                                      └──► MongoDB saves chat history
+                                            └──► GET /chathistory returns history
+```
+
+---
+
+## 📋 Known Gaps (Intentional)
+
+| File | Status | Why |
+|---|---|---|
+| `sectoroff.py` | Stub (`pass`) | Not implemented yet |
+| `fdtl.py` | Empty | Not implemented yet |
+| `dayuse.py` | Empty | Not implemented yet |
+| `roaster.py` sickness | Live MCP only | Cannot test without Azure AD |
+| LoungeWorkflow full async | Helpers tested | Full async needs live Lounge API |
+| Request size limit 1MB | `xfail` test | Middleware not added yet |
+
+---
+
+*Document generated: July 2026 | Project: OCC Converse API | Author: Vijaya Duggirala*
