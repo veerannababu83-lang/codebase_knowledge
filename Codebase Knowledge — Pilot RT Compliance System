@@ -1,0 +1,388 @@
+# 📘 Codebase Knowledge — Pilot RT Compliance System
+> Simple, plain-language guide to what this app is, how it works, and how each piece connects.
+
+---
+
+## 🎯 What Is This App?
+
+This is a **Pilot Recurrent Training (RT) Compliance Checker**.
+
+Airlines must make sure their pilots practice certain flying skills regularly (every 6, 12, or 36 months). After every training session, the instructor writes notes — this is the **RT document (PDF)**.
+
+This app:
+1. **Reads the rules** (ICAO standards, IOSA standards, airline manuals)
+2. **Builds a training matrix** (list of all topics pilots must train)
+3. **Checks the RT PDF** — did the pilot cover all required topics?
+4. **Generates a report** — what's compliant ✅, what's missing ❌, what's a warning ⚠️
+
+**Target Users:** Airline training departments, flight operations managers.
+
+---
+
+## 🗂️ Repo Structure — Every Folder & File Explained
+
+```
+fltops-pilot-training-api/
+│
+├── 📄 api.py                    ← The main backend web server (FastAPI)
+├── 📄 main.py                   ← Command-line tool to run the pipeline
+├── 📄 auth.py                   ← Login/security (Azure AD tokens)
+├── 📄 config.py                 ← All settings & environment variables
+├── 📄 db.py                     ← Database read/write (MongoDB)
+├── 📄 vector_store.py           ← AI search database (pgvector)
+├── 📄 document_loader.py        ← Reads PDFs & Excel files
+├── 📄 blob_storage.py           ← Downloads files from Azure cloud storage
+├── 📄 export_compliance_excel.py← Exports results to Excel file
+├── 📄 upload_knowledge.py       ← CLI tool to upload knowledge docs
+├── 📄 setup_vector_index.py     ← Sets up AI vector search index
+├── 📄 remove_page.py            ← Utility to remove a page from PDF
+├── 📄 requirements.txt          ← Python packages needed
+│
+├── 📁 agents/                   ← AI Agents (each does one job)
+│   ├── base_agent.py            ← Shared code all agents use
+│   ├── orchestrator_agent.py    ← Boss agent — runs all others in order
+│   ├── ops_manual_agent.py      ← Reads Ops Manual Part D
+│   ├── amendments_agent.py      ← Reads airline amendments/updates
+│   ├── iosa_agent.py            ← Reads IOSA safety standards
+│   ├── iosa_agent_ebt.py        ← IOSA specific to EBT training
+│   ├── icao_agent.py            ← Reads ICAO international standards
+│   ├── failure_matrix_agent.py  ← Reads aircraft failure training matrix
+│   ├── guidelines_agent.py      ← Reads PBS training guidelines
+│   ├── matrix_builder_agent.py  ← Combines all topics into one master list
+│   ├── rt_analyzer_agent.py     ← Reads RT PDF and checks what's covered
+│   └── compliance_agent.py      ← Checks coverage against frequency rules
+│
+├── 📁 tests/                    ← All automated tests
+│   ├── conftest.py              ← Shared test setup (fake DB, fake AI, etc.)
+│   ├── integration/             ← Tests that hit the actual API endpoints
+│   ├── unit/                    ← Tests that test single functions directly
+│   ├── business_flows/          ← Tests that simulate real user actions
+│   └── ai_safety/               ← Tests that check AI safety guardrails
+│
+├── 📁 CICD/                     ← Deployment pipeline files (GitHub Actions etc.)
+├── 📄 Dockerfile                ← How to package app into a container
+├── 📄 docker-compose.yml        ← Run app + database together locally
+└── 📄 Jenkinsfile               ← CI/CD build instructions
+```
+
+---
+
+## 🏗️ Architecture — Simple Picture
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                    FRONTEND (React UI)                   │
+│         (separate repo — runs on localhost:3000)         │
+└────────────────────────┬────────────────────────────────┘
+                         │  HTTP requests
+                         ▼
+┌─────────────────────────────────────────────────────────┐
+│                   BACKEND (api.py)                       │
+│                   FastAPI server                         │
+│                   Port 8000                              │
+│                                                          │
+│  ┌──────────┐  ┌──────────┐  ┌───────────────────────┐  │
+│  │  auth.py │  │  db.py   │  │   agents/ folder      │  │
+│  │  (login) │  │ (MongoDB)│  │   (AI processing)     │  │
+│  └──────────┘  └──────────┘  └───────────────────────┘  │
+└─────────────────────────────────────────────────────────┘
+                         │
+          ┌──────────────┼──────────────┐
+          ▼              ▼              ▼
+   ┌────────────┐  ┌──────────┐  ┌──────────────┐
+   │  MongoDB   │  │ pgvector │  │ Azure Blob   │
+   │ (results) │  │ (AI search│  │ (knowledge   │
+   │            │  │  store)  │  │  PDF files)  │
+   └────────────┘  └──────────┘  └──────────────┘
+```
+
+---
+
+## 🔄 The 6-Phase Pipeline (How the system works)
+
+```
+Phase 1: KNOWLEDGE INGESTION
+   ↓  Read all PDFs (ICAO, IOSA, Ops Manual, Amendments, Guidelines, Failures)
+   ↓  Store in pgvector (AI search database)
+
+Phase 2: TOPIC EXTRACTION
+   ↓  Each agent reads its document and extracts training topics
+   ↓  e.g. "Wind Shear Recovery", "TCAS Training", "Engine Fire"
+
+Phase 3: MATRIX BUILDING
+   ↓  All topics merged into one master EBT Matrix
+   ↓  Each topic tagged with: frequency (6/12/36 months), mandatory?, source
+
+Phase 4: RT ANALYSIS
+   ↓  Read the pilot's RT PDF
+   ↓  AI checks: "Was Wind Shear covered in this RT?"
+   ↓  Result: topic-by-topic covered/not-covered
+
+Phase 5: COMPLIANCE CHECK
+   ↓  Compare RT history against frequency rules
+   ↓  6-month topic missing → VIOLATION 🚨
+   ↓  12-month topic approaching deadline → WARNING ⚠️
+
+Phase 6: REPORTING
+   ↓  Generate final compliance report
+   ↓  Save to MongoDB + JSON + Excel
+```
+
+---
+
+## 🌐 All API Endpoints
+
+### ✅ Public (no login needed)
+| Method | URL | What it does |
+|--------|-----|--------------|
+| GET | `/` | Health check — "is the server running?" |
+| GET | `/api/health` | Detailed health status |
+| GET | `/__routes` | List all registered routes |
+
+### 🔒 Protected (needs Azure AD token)
+
+#### Dashboard
+| Method | URL | What it does |
+|--------|-----|--------------|
+| GET | `/api/dashboard` | Summary: total topics, violations, warnings, RT coverage % |
+
+#### EBT Matrix
+| Method | URL | What it does |
+|--------|-----|--------------|
+| GET | `/api/matrix` | Get full training matrix (all topics) |
+| GET | `/api/matrix/download` | Download matrix as Excel file |
+| GET | `/api/matrix/failures` | Get failure-specific topics only |
+
+#### RT Analyses
+| Method | URL | What it does |
+|--------|-----|--------------|
+| GET | `/api/rt-analyses` | Get all RT results |
+| GET | `/api/rt-analyses/{rt_id}` | Get one specific RT result |
+| DELETE | `/api/rt-analyses/{rt_id}` | Delete one RT |
+
+#### Upload
+| Method | URL | What it does |
+|--------|-----|--------------|
+| POST | `/api/upload-rt` | Upload a new RT PDF → triggers compliance check |
+| POST | `/api/upload-batch` | Upload multiple RTs at once |
+| GET | `/api/validation-status` | Check if upload is still processing |
+| POST | `/api/cancel-validation` | Cancel an in-progress upload |
+
+#### Compliance Results
+| Method | URL | What it does |
+|--------|-----|--------------|
+| GET | `/api/compliance` | Full compliance report |
+| GET | `/api/compliance/violations` | Only violations 🚨 |
+| GET | `/api/compliance/warnings` | Only warnings ⚠️ |
+| GET | `/api/compliance/by-rt` | Results grouped per RT cycle |
+| GET | `/api/compliance/timeline` | Topic coverage across all RTs |
+| GET | `/api/compliance/download` | Download report as JSON |
+
+#### Admin / Debug
+| Method | URL | What it does |
+|--------|-----|--------------|
+| GET | `/api/blobs` | List knowledge files in Azure Blob |
+| POST | `/api/sync-blobs` | Re-download knowledge files from Azure |
+| POST | `/api/reset` | Clear all RT data (start fresh) |
+
+---
+
+## 👤 User Flows (Step by Step)
+
+### Flow 1: First-Time Setup
+```
+Admin runs: python main.py
+    ↓
+App reads all knowledge docs (ICAO, IOSA, Ops Manual...)
+    ↓
+Builds EBT Matrix (list of all training topics)
+    ↓
+Saves matrix to MongoDB
+    ↓
+Dashboard shows matrix, awaiting first RT upload
+```
+
+### Flow 2: Upload a New RT (Most Common)
+```
+User opens Frontend UI
+    ↓
+Clicks "Upload RT" → selects PDF file
+    ↓
+Frontend sends: POST /api/upload-rt (with PDF)
+    ↓
+Backend saves PDF to uploads/ folder
+    ↓
+Background thread starts:
+    1. Loads all previous RTs from MongoDB
+    2. AI reads new RT PDF
+    3. Checks each training topic: covered? yes/no
+    4. Adds new RT to history
+    5. Runs compliance rules on full history
+    6. Saves results to MongoDB
+    ↓
+Frontend polls: GET /api/validation-status
+    ↓
+When done, Frontend shows: GET /api/dashboard
+    ↓
+User sees: ✅ Compliant / ⚠️ Warnings / 🚨 Violations
+```
+
+### Flow 3: View Compliance Report
+```
+User clicks "Compliance" in UI
+    ↓
+GET /api/compliance
+    ↓
+Shows: violations list, warnings list, topic timeline
+    ↓
+User can download: GET /api/compliance/download
+```
+
+### Flow 4: Download Matrix Excel
+```
+User clicks "Download Matrix"
+    ↓
+GET /api/matrix/download
+    ↓
+Returns formatted .xlsx file with all training topics
+```
+
+---
+
+## 🤖 Agents — What Each One Does
+
+| Agent | Job |
+|-------|-----|
+| `orchestrator_agent.py` | **Boss** — runs all phases in order, handles errors |
+| `icao_agent.py` | Reads **ICAO** international aviation standards |
+| `iosa_agent.py` | Reads **IOSA** safety audit standards |
+| `ops_manual_agent.py` | Reads **Ops Manual Part D** (airline's own procedures) |
+| `amendments_agent.py` | Reads **Amendments** (updates to procedures) |
+| `failure_matrix_agent.py` | Reads **Aircraft failure training** (engine fire, hydraulic failure etc.) |
+| `guidelines_agent.py` | Reads **PBS Training Guidelines** |
+| `matrix_builder_agent.py` | **Merges** all topics from all agents into one clean list |
+| `rt_analyzer_agent.py` | **Reads RT PDF** and checks which topics were covered |
+| `compliance_agent.py` | **Applies rules** — was each topic done in time? |
+
+---
+
+## 📊 Compliance Rules (Simple)
+
+| Topic Frequency | Rule | Consequence if missed |
+|-----------------|------|-----------------------|
+| Every **6 months** | Must be in EVERY RT | 🚨 VIOLATION immediately |
+| Every **12 months** | Must appear in at least 1 of every 2 RTs | ⚠️ WARNING then 🚨 VIOLATION |
+| Every **36 months** | Must appear at least once in 6 RTs | ⚠️ WARNING approaching, 🚨 VIOLATION if missed |
+
+---
+
+## 🗄️ Database — What's Stored Where
+
+### MongoDB (main database)
+| Collection | What's stored |
+|-----------|--------------|
+| `RT_compliance_ebt_matrix` | All training topics (the matrix) |
+| `RT_compliance_matrix_meta` | Matrix statistics & source counts |
+| `RT_compliance_rt_analyses` | Results of each RT analysis |
+| `RT_compliance_compliance_results` | Latest compliance check result |
+| `RT_compliance_rt_uploads` | History of uploaded RT files |
+
+### pgvector (AI search database)
+- Stores **text chunks** from all knowledge documents
+- Used by agents to do **semantic search** ("find topics related to wind shear")
+
+### Azure Blob Storage (file storage)
+- Stores the **knowledge PDF/Excel files** (ICAO docs, IOSA docs etc.)
+- App downloads them at startup via `blob_storage.py`
+
+---
+
+## 🔐 Authentication (Login System)
+
+```
+Frontend → Login via Azure AD (Microsoft login)
+         → Gets a JWT token
+         → Sends token in every API request header:
+           Authorization: Bearer <token>
+         
+Backend  → Middleware checks token on every request
+         → If valid → allow
+         → If missing/invalid → 401 Unauthorized
+         
+Tests    → Set AUTH_ENABLED=false → skip auth check
+```
+
+---
+
+## 📁 Tests Folder — What Each Part Tests
+
+```
+tests/
+├── conftest.py           ← Shared setup: fake database, fake AI, fake login
+│
+├── integration/          ← "Does the API return the right data?"
+│   ├── test_api_core.py            ← Dashboard, RT analyses endpoints
+│   ├── test_api_results.py         ← Compliance, matrix, timeline endpoints
+│   ├── test_api_upload_validation.py ← Upload RT endpoint
+│   └── test_api_admin_blob_debug.py  ← Admin/blob endpoints
+│
+├── unit/                 ← "Does this single function work correctly?"
+│   ├── test_compliance_engine_unit.py ← Compliance rules logic
+│   ├── test_rt_analyzer_unit.py       ← RT PDF reading logic
+│   └── test_agents_unit.py            ← Each agent initialises correctly
+│
+├── business_flows/       ← "Does the full user journey work end-to-end?"
+│   ├── test_flow_single_rt.py    ← Upload 1 RT → see results
+│   ├── test_flow_multiple_rts.py ← Upload many RTs → see combined results
+│   ├── test_flow_non_compliance.py ← Missing topics → violations appear
+│   ├── test_flow_reset_delete.py   ← Reset/delete works correctly
+│   └── test_flow_exports.py        ← Excel download works
+│
+└── ai_safety/            ← "Is the AI safe? No hallucinations? No injection?"
+    ├── test_guardrails_api.py          ← Only PDFs accepted, bad input rejected
+    ├── test_authorization_boundaries.py ← Auth checks on routes
+    ├── test_data_leakage_protection.py  ← No secrets exposed in responses
+    ├── test_abuse_and_anomaly_cases.py  ← Weird/bad inputs handled safely
+    ├── test_hallucination_controls.py   ← AI doesn't make up data
+    └── test_prompt_injection_protection.py ← AI resists manipulation
+```
+
+---
+
+## 🔧 Key Config Settings (environment variables)
+
+| Variable | What it controls |
+|----------|-----------------|
+| `AUTH_ENABLED` | `true` = require login, `false` = open (use `false` for tests) |
+| `MONGO_URI` | MongoDB connection string |
+| `AZURE_OPENAI_ENDPOINT` | Azure AI endpoint for GPT |
+| `AZURE_EMBEDDING_ENDPOINT` | Azure AI endpoint for text embeddings |
+| `AZURE_BLOB_ACCOUNT_URL` | Where knowledge files are stored |
+| `AZURE_AD_TENANT_ID` | Azure login tenant |
+| `AZURE_AD_CLIENT_ID` | Azure app registration ID |
+| `OUTPUT_DIR` | Where reports are saved |
+| `UPLOAD_DIR` | Where uploaded RT PDFs are saved |
+
+---
+
+## 🔁 How Frontend & Backend Talk
+
+```
+Frontend (React, port 3000)          Backend (FastAPI, port 8000)
+        │                                       │
+        │── GET /api/dashboard ────────────────►│
+        │◄─ {total_topics, violations, ...} ────│
+        │                                       │
+        │── POST /api/upload-rt (PDF file) ─────►│
+        │◄─ {status: "validating"} ──────────────│
+        │                                       │
+        │── GET /api/validation-status ──────────►│  (polls every few seconds)
+        │◄─ {state: "done"} ─────────────────────│
+        │                                       │
+        │── GET /api/compliance ─────────────────►│
+        │◄─ {violations: [...], warnings: [...]}──│
+```
+
+CORS (cross-origin) is configured to allow:
+- `http://localhost:3000` (local dev)
+- `https://flight-ms-dev-*.azurewebsites.net` (production)
